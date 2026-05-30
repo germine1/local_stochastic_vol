@@ -1,0 +1,732 @@
+"""
+Greeks Calculator - Comprehensive Risk Metrics for Options
+
+Greeks are partial derivatives of option price with respect to various parameters.
+They measure the sensitivity of option prices to market variables.
+
+First-Order Greeks:
+==================
+Delta (Δ):   ∂V/∂S  - Sensitivity to spot price (hedge ratio)
+Vega (ν):    ∂V/∂σ  - Sensitivity to volatility
+Theta (Θ):   ∂V/∂t  - Time decay (typically negative)
+Rho (ρ):     ∂V/∂r  - Sensitivity to interest rate
+Epsilon (ε): ∂V/∂q  - Sensitivity to dividend yield
+
+Second-Order Greeks:
+===================
+Gamma (Γ):   ∂²V/∂S² = ∂Δ/∂S  - Convexity, delta hedging cost
+Vanna:       ∂²V/∂S∂σ = ∂Δ/∂σ  - Change in delta w.r.t. volatility
+Charm:       ∂²V/∂S∂t = ∂Δ/∂t  - Delta decay over time
+Vomma/Volga: ∂²V/∂σ² = ∂ν/∂σ  - Convexity in volatility
+
+Third-Order Greeks:
+==================
+Speed:       ∂³V/∂S³ = ∂Γ/∂S   - Rate of gamma change
+Zomma:       ∂³V/∂S²∂σ = ∂Γ/∂σ - Gamma sensitivity to volatility
+Color:       ∂³V/∂S²∂t = ∂Γ/∂t - Gamma decay over time
+
+Calculation Methods:
+===================
+1. Analytical: Closed-form formulas (fastest, most accurate)
+2. Finite Difference: Bump-and-recompute (flexible, works for any model)
+3. Pathwise: Monte Carlo simulation derivatives
+4. Likelihood Ratio: Monte Carlo for discontinuous payoffs
+"""
+
+import numpy as np
+from scipy.stats import norm
+from typing import Dict, Callable, Optional, Tuple, List
+import warnings
+
+class GreeksCalculator:
+    """
+    Comprehensive Greeks calculator supporting multiple methods and models
+    
+    Methods:
+    - Analytical formulas (Black-Scholes, Heston)
+    - Finite difference (numerical bumping)
+    - Automatic method selection based on model type
+    """
+    
+    def __init__(self, method: str = 'auto', bump_size: float = 0.01):
+        """
+        Initialize Greeks calculator
+        
+        Args:
+            method: 'analytical', 'finite_difference', or 'auto'
+                   'auto' uses analytical if available, else finite difference
+            bump_size: Relative bump size for finite difference (default 1%)
+        """
+        self.method = method.lower()
+        self.bump_size = bump_size
+        
+        if self.method not in ['analytical', 'finite_difference', 'auto']:
+            raise ValueError(f"Unknown method: {method}")
+    
+    # ========== Black-Scholes Analytical Greeks ==========
+    
+    def black_scholes_greeks(self, S: float, K: float, T: float, r: float,
+                            sigma: float, q: float = 0.0,
+                            option_type: str = 'call') -> Dict[str, float]:
+        """
+        Calculate all Greeks analytically for Black-Scholes model
+        
+        Black-Scholes Formula:
+        C = S*e^(-q*T)*N(d1) - K*e^(-r*T)*N(d2)
+        P = K*e^(-r*T)*N(-d2) - S*e^(-q*T)*N(-d1)
+        
+        where:
+        d1 = [ln(S/K) + (r - q + σ²/2)*T] / (σ√T)
+        d2 = d1 - σ√T
+        
+        Analytical Greeks:
+        =================
+        
+        Delta:
+        Δ_call = e^(-q*T) * N(d1)
+        Δ_put = -e^(-q*T) * N(-d1) = Δ_call - e^(-q*T)
+        
+        Gamma (same for call and put):
+        Γ = e^(-q*T) * φ(d1) / (S*σ*√T)
+        where φ(x) = (1/√(2π)) * e^(-x²/2) is standard normal PDF
+        
+        Vega (same for call and put):
+        ν = S * e^(-q*T) * φ(d1) * √T
+        
+        Theta:
+        Θ_call = -[S*φ(d1)*σ*e^(-q*T)]/(2√T) - r*K*e^(-r*T)*N(d2) + q*S*e^(-q*T)*N(d1)
+        Θ_put = -[S*φ(d1)*σ*e^(-q*T)]/(2√T) + r*K*e^(-r*T)*N(-d2) - q*S*e^(-q*T)*N(-d1)
+        
+        Rho:
+        ρ_call = K*T*e^(-r*T)*N(d2)
+        ρ_put = -K*T*e^(-r*T)*N(-d2)
+        
+        Vanna (∂Δ/∂σ = ∂ν/∂S):
+        Vanna = -e^(-q*T) * φ(d1) * d2 / σ
+        
+        Volga/Vomma (∂ν/∂σ):
+        Volga = S * e^(-q*T) * φ(d1) * √T * (d1*d2) / σ
+        
+        Charm (∂Δ/∂t):
+        Charm_call = q*e^(-q*T)*N(d1) - e^(-q*T)*φ(d1)*[2(r-q)T - d2*σ*√T]/(2T*σ*√T)
+        
+        Args:
+            S: Spot price
+            K: Strike price
+            T: Time to maturity (years)
+            r: Risk-free rate
+            sigma: Volatility
+            q: Dividend yield
+            option_type: 'call' or 'put'
+        
+        Returns:
+            Dictionary with all Greeks
+        """
+        if T <= 0:
+            return self._greeks_at_expiry(S, K, option_type)
+        
+        if sigma <= 0:
+            raise ValueError(f"Volatility must be positive, got {sigma}")
+        
+        # Calculate d1 and d2
+        d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        
+        # Standard normal PDF and CDF
+        phi_d1 = norm.pdf(d1)  # φ(d1)
+        N_d1 = norm.cdf(d1)    # N(d1)
+        N_d2 = norm.cdf(d2)    # N(d2)
+        
+        sqrt_T = np.sqrt(T)
+        exp_qT = np.exp(-q * T)
+        exp_rT = np.exp(-r * T)
+        
+        # Common terms
+        S_exp_qT = S * exp_qT
+        K_exp_rT = K * exp_rT
+        
+        # ===== First-Order Greeks =====
+        
+        # Delta
+        if option_type.lower() == 'call':
+            delta = exp_qT * N_d1
+        else:
+            delta = -exp_qT * norm.cdf(-d1)
+        
+        # Gamma (same for call and put)
+        gamma = exp_qT * phi_d1 / (S * sigma * sqrt_T)
+        
+        # Vega (same for call and put, often reported per 1% change)
+        vega = S_exp_qT * phi_d1 * sqrt_T
+        vega_pct = vega / 100  # Vega for 1% vol change
+        
+        # Theta (time decay, typically negative)
+        theta_common = -(S_exp_qT * phi_d1 * sigma) / (2 * sqrt_T)
+        
+        if option_type.lower() == 'call':
+            theta = theta_common - r * K_exp_rT * N_d2 + q * S_exp_qT * N_d1
+        else:
+            theta = theta_common + r * K_exp_rT * norm.cdf(-d2) - q * S_exp_qT * norm.cdf(-d1)
+        
+        theta_per_day = theta / 365  # Daily theta
+        
+        # Rho (sensitivity to interest rate, often per 1% change)
+        if option_type.lower() == 'call':
+            rho = K_exp_rT * T * N_d2
+        else:
+            rho = -K_exp_rT * T * norm.cdf(-d2)
+        
+        rho_pct = rho / 100  # Rho for 1% rate change
+        
+        # Epsilon (sensitivity to dividend yield)
+        if option_type.lower() == 'call':
+            epsilon = -S_exp_qT * T * N_d1
+        else:
+            epsilon = S_exp_qT * T * norm.cdf(-d1)
+        
+        # ===== Second-Order Greeks =====
+        
+        # Vanna (∂Delta/∂σ = ∂Vega/∂S)
+        vanna = -exp_qT * phi_d1 * d2 / sigma
+        
+        # Volga/Vomma (∂Vega/∂σ, convexity in volatility)
+        volga = S_exp_qT * phi_d1 * sqrt_T * (d1 * d2) / sigma
+        
+        # Charm (∂Delta/∂t, delta decay)
+        if option_type.lower() == 'call':
+            charm = q * exp_qT * N_d1 - exp_qT * phi_d1 * \
+                   (2 * (r - q) * T - d2 * sigma * sqrt_T) / (2 * T * sigma * sqrt_T)
+        else:
+            charm = -q * exp_qT * norm.cdf(-d1) - exp_qT * phi_d1 * \
+                   (2 * (r - q) * T - d2 * sigma * sqrt_T) / (2 * T * sigma * sqrt_T)
+        
+        # Veta (∂Vega/∂t)
+        veta = -S_exp_qT * phi_d1 * sqrt_T * \
+               (q + ((r - q) * d1) / (sigma * sqrt_T) - (1 + d1 * d2) / (2 * T))
+        
+        # ===== Third-Order Greeks =====
+        
+        # Speed (∂Gamma/∂S = ∂³V/∂S³)
+        speed = -gamma * (d1 / (S * sigma * sqrt_T) + 1 / S)
+        
+        # Zomma (∂Gamma/∂σ)
+        zomma = gamma * (d1 * d2 - 1) / sigma
+        
+        # Color (∂Gamma/∂t)
+        color = -exp_qT * phi_d1 / (2 * S * T * sigma * sqrt_T) * \
+               (2 * q * T + 1 + (2 * (r - q) * T - d2 * sigma * sqrt_T) * d1 / (sigma * sqrt_T))
+        
+        # ===== Probability Greeks =====
+        
+        # Probability of finishing ITM (risk-neutral measure)
+        if option_type.lower() == 'call':
+            prob_itm = N_d2
+        else:
+            prob_itm = norm.cdf(-d2)
+        
+        # Dual Delta (probability of exercise in physical measure, approx)
+        dual_delta = exp_rT * prob_itm
+        
+        return {
+            # Price
+            'price': self._black_scholes_price(S, K, T, r, sigma, q, option_type),
+            
+            # First-order Greeks
+            'delta': delta,
+            'gamma': gamma,
+            'vega': vega,
+            'vega_pct': vega_pct,  # Per 1% vol change
+            'theta': theta,
+            'theta_per_day': theta_per_day,
+            'rho': rho,
+            'rho_pct': rho_pct,  # Per 1% rate change
+            'epsilon': epsilon,
+            
+            # Second-order Greeks
+            'vanna': vanna,
+            'volga': volga,
+            'charm': charm,
+            'veta': veta,
+            
+            # Third-order Greeks
+            'speed': speed,
+            'zomma': zomma,
+            'color': color,
+            
+            # Probabilities
+            'prob_itm': prob_itm,
+            'dual_delta': dual_delta,
+            
+            # Inputs (for reference)
+            'S': S,
+            'K': K,
+            'T': T,
+            'r': r,
+            'sigma': sigma,
+            'q': q,
+            'option_type': option_type
+        }
+    
+    def _black_scholes_price(self, S: float, K: float, T: float, r: float,
+                            sigma: float, q: float, option_type: str) -> float:
+        """Black-Scholes option price"""
+        if T <= 0:
+            if option_type.lower() == 'call':
+                return max(S - K, 0)
+            else:
+                return max(K - S, 0)
+        
+        d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        
+        if option_type.lower() == 'call':
+            return S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+        else:
+            return K * np.exp(-r * T) * norm.cdf(-d2) - S * np.exp(-q * T) * norm.cdf(-d1)
+    
+    def _greeks_at_expiry(self, S: float, K: float, option_type: str) -> Dict[str, float]:
+        """Greeks at expiration (T=0)"""
+        if option_type.lower() == 'call':
+            price = max(S - K, 0)
+            delta = 1.0 if S > K else 0.0
+        else:
+            price = max(K - S, 0)
+            delta = -1.0 if S < K else 0.0
+        
+        # At expiry, most Greeks are zero or undefined
+        return {
+            'price': price,
+            'delta': delta,
+            'gamma': np.inf if S == K else 0,  # Dirac delta at strike
+            'vega': 0,
+            'theta': 0,
+            'rho': 0,
+            'epsilon': 0,
+            'vanna': 0,
+            'volga': 0,
+            'charm': 0,
+            'veta': 0,
+            'speed': 0,
+            'zomma': 0,
+            'color': 0,
+            'prob_itm': 1.0 if (S > K and option_type.lower() == 'call') or 
+                             (S < K and option_type.lower() == 'put') else 0.0
+        }
+    
+    # ========== Finite Difference Greeks ==========
+    
+    def finite_difference_greeks(self, pricing_func: Callable, S: float, K: float,
+                                T: float, r: float, sigma: float, q: float = 0.0,
+                                option_type: str = 'call',
+                                greeks_list: Optional[List[str]] = None) -> Dict[str, float]:
+        """
+        Calculate Greeks using finite difference (bump and recompute)
+        
+        Finite Difference Formulas:
+        ==========================
+        
+        Central difference (second-order accurate):
+        f'(x) ≈ [f(x+h) - f(x-h)] / (2h)
+        
+        Second derivative:
+        f''(x) ≈ [f(x+h) - 2f(x) + f(x-h)] / h²
+        
+        Cross derivative:
+        ∂²f/∂x∂y ≈ [f(x+h,y+k) - f(x+h,y-k) - f(x-h,y+k) + f(x-h,y-k)] / (4hk)
+        
+        Args:
+            pricing_func: Function that prices option
+                         Signature: pricing_func(S, K, T, r, sigma, q, option_type) -> float
+            S, K, T, r, sigma, q: Option parameters
+            option_type: 'call' or 'put'
+            greeks_list: List of Greeks to compute (default: all first-order)
+        
+        Returns:
+            Dictionary with computed Greeks
+        """
+        if greeks_list is None:
+            greeks_list = ['delta', 'gamma', 'vega', 'theta', 'rho']
+        
+        # Base price
+        V0 = pricing_func(S, K, T, r, sigma, q, option_type)
+        
+        results = {'price': V0}
+        
+        # Delta: ∂V/∂S
+        if 'delta' in greeks_list:
+            h_S = S * self.bump_size
+            V_up = pricing_func(S + h_S, K, T, r, sigma, q, option_type)
+            V_down = pricing_func(S - h_S, K, T, r, sigma, q, option_type)
+            results['delta'] = (V_up - V_down) / (2 * h_S)
+        
+        # Gamma: ∂²V/∂S²
+        if 'gamma' in greeks_list:
+            h_S = S * self.bump_size
+            V_up = pricing_func(S + h_S, K, T, r, sigma, q, option_type)
+            V_down = pricing_func(S - h_S, K, T, r, sigma, q, option_type)
+            results['gamma'] = (V_up - 2 * V0 + V_down) / (h_S**2)
+        
+        # Vega: ∂V/∂σ
+        if 'vega' in greeks_list:
+            h_sigma = self.bump_size  # Absolute bump for volatility
+            V_up = pricing_func(S, K, T, r, sigma + h_sigma, q, option_type)
+            V_down = pricing_func(S, K, T, r, sigma - h_sigma, q, option_type)
+            results['vega'] = (V_up - V_down) / (2 * h_sigma)
+            results['vega_pct'] = results['vega'] / 100
+        
+        # Theta: ∂V/∂t (negative of ∂V/∂T)
+        if 'theta' in greeks_list:
+            h_T = min(self.bump_size * T, 1/365)  # At least 1 day
+            if T > h_T:
+                V_down = pricing_func(S, K, T - h_T, r, sigma, q, option_type)
+                results['theta'] = -(V0 - V_down) / h_T  # Negative because theta = -∂V/∂T
+                results['theta_per_day'] = results['theta'] / 365
+            else:
+                results['theta'] = 0
+                results['theta_per_day'] = 0
+        
+        # Rho: ∂V/∂r
+        if 'rho' in greeks_list:
+            h_r = self.bump_size * 0.01  # 1 basis point
+            V_up = pricing_func(S, K, T, r + h_r, sigma, q, option_type)
+            V_down = pricing_func(S, K, T, r - h_r, sigma, q, option_type)
+            results['rho'] = (V_up - V_down) / (2 * h_r)
+            results['rho_pct'] = results['rho'] / 100
+        
+        # Vanna: ∂²V/∂S∂σ
+        if 'vanna' in greeks_list:
+            h_S = S * self.bump_size
+            h_sigma = self.bump_size
+            
+            V_up_up = pricing_func(S + h_S, K, T, r, sigma + h_sigma, q, option_type)
+            V_up_down = pricing_func(S + h_S, K, T, r, sigma - h_sigma, q, option_type)
+            V_down_up = pricing_func(S - h_S, K, T, r, sigma + h_sigma, q, option_type)
+            V_down_down = pricing_func(S - h_S, K, T, r, sigma - h_sigma, q, option_type)
+            
+            results['vanna'] = (V_up_up - V_up_down - V_down_up + V_down_down) / (4 * h_S * h_sigma)
+        
+        # Volga: ∂²V/∂σ²
+        if 'volga' in greeks_list:
+            h_sigma = self.bump_size
+            V_up = pricing_func(S, K, T, r, sigma + h_sigma, q, option_type)
+            V_down = pricing_func(S, K, T, r, sigma - h_sigma, q, option_type)
+            results['volga'] = (V_up - 2 * V0 + V_down) / (h_sigma**2)
+        
+        # Charm: ∂²V/∂S∂t
+        if 'charm' in greeks_list:
+            h_S = S * self.bump_size
+            h_T = min(self.bump_size * T, 1/365)
+            
+            if T > h_T:
+                V_up_0 = pricing_func(S + h_S, K, T, r, sigma, q, option_type)
+                V_down_0 = pricing_func(S - h_S, K, T, r, sigma, q, option_type)
+                V_up_t = pricing_func(S + h_S, K, T - h_T, r, sigma, q, option_type)
+                V_down_t = pricing_func(S - h_S, K, T - h_T, r, sigma, q, option_type)
+                
+                delta_0 = (V_up_0 - V_down_0) / (2 * h_S)
+                delta_t = (V_up_t - V_down_t) / (2 * h_S)
+                
+                results['charm'] = -(delta_0 - delta_t) / h_T
+            else:
+                results['charm'] = 0
+        
+        return results
+    
+    # ========== Model-Specific Greeks ==========
+    
+    def heston_greeks(self, S0: float, K: float, T: float, r: float, q: float,
+                     v0: float, kappa: float, theta: float, sigma: float, rho: float,
+                     option_type: str = 'call',
+                     method: str = 'finite_difference') -> Dict[str, float]:
+        """
+        Calculate Greeks for Heston model
+        
+        For Heston, we need additional Greeks:
+        - Vega_v0: ∂V/∂v₀ (sensitivity to initial variance)
+        - Vega_theta: ∂V/∂θ (sensitivity to long-run variance)
+        
+        Args:
+            S0: Spot price
+            K: Strike price
+            T: Time to maturity
+            r: Risk-free rate
+            q: Dividend yield
+            v0: Initial variance
+            kappa: Mean reversion speed
+            theta: Long-run variance
+            sigma: Vol-of-vol
+            rho: Correlation
+            option_type: 'call' or 'put'
+            method: 'finite_difference' or 'analytical' (if available)
+        
+        Returns:
+            Dictionary with Greeks including Heston-specific ones
+        """
+        # Import Heston model
+        from models.heston import HestonModel
+        
+        # Create Heston model instance
+        heston = HestonModel(S0, v0, r, q, kappa, theta, sigma, rho)
+        
+        # Pricing function
+        def price_func(S, K, T, r, sig, q, opt_type):
+            # Note: 'sig' is ignored for Heston, we use model parameters
+            temp_model = HestonModel(S, v0, r, q, kappa, theta, sigma, rho)
+            return temp_model.price_european(K, T, opt_type)
+        
+        # Standard Greeks using finite difference
+        greeks = self.finite_difference_greeks(
+            price_func, S0, K, T, r, 0.2, q, option_type,  # sigma placeholder
+            greeks_list=['delta', 'gamma', 'theta', 'rho']
+        )
+        
+        # Heston-specific Greeks
+        # Vega w.r.t. initial variance v0
+        h_v0 = v0 * self.bump_size
+        model_up = HestonModel(S0, v0 + h_v0, r, q, kappa, theta, sigma, rho)
+        model_down = HestonModel(S0, v0 - h_v0, r, q, kappa, theta, sigma, rho)
+        
+        V_up = model_up.price_european(K, T, option_type)
+        V_down = model_down.price_european(K, T, option_type)
+        
+        greeks['vega_v0'] = (V_up - V_down) / (2 * h_v0)
+        
+        # Vega w.r.t. long-run variance theta
+        h_theta = theta * self.bump_size
+        model_up = HestonModel(S0, v0, r, q, kappa, theta + h_theta, sigma, rho)
+        model_down = HestonModel(S0, v0, r, q, kappa, theta - h_theta, sigma, rho)
+        
+        V_up = model_up.price_european(K, T, option_type)
+        V_down = model_down.price_european(K, T, option_type)
+        
+        greeks['vega_theta'] = (V_up - V_down) / (2 * h_theta)
+        
+        # Sensitivity to vol-of-vol
+        h_sigma = sigma * self.bump_size
+        model_up = HestonModel(S0, v0, r, q, kappa, theta, sigma + h_sigma, rho)
+        model_down = HestonModel(S0, v0, r, q, kappa, theta, sigma - h_sigma, rho)
+        
+        V_up = model_up.price_european(K, T, option_type)
+        V_down = model_down.price_european(K, T, option_type)
+        
+        greeks['vega_sigma'] = (V_up - V_down) / (2 * h_sigma)
+        
+        # Sensitivity to correlation
+        h_rho = self.bump_size
+        model_up = HestonModel(S0, v0, r, q, kappa, theta, sigma, 
+                              min(rho + h_rho, 0.99))
+        model_down = HestonModel(S0, v0, r, q, kappa, theta, sigma, 
+                                max(rho - h_rho, -0.99))
+        
+        V_up = model_up.price_european(K, T, option_type)
+        V_down = model_down.price_european(K, T, option_type)
+        
+        greeks['vega_rho'] = (V_up - V_down) / (2 * h_rho)
+        
+        return greeks
+    
+    # ========== Portfolio Greeks ==========
+    
+    def portfolio_greeks(self, positions: List[Dict]) -> Dict[str, float]:
+        """
+        Calculate portfolio-level Greeks
+        
+        For a portfolio of options, Greeks are additive:
+        Δ_portfolio = Σ w_i * Δ_i
+        
+        where w_i is the position size (positive for long, negative for short)
+        
+        Args:
+            positions: List of dictionaries, each containing:
+                      {
+                          'weight': position size (quantity),
+                          'greeks': dictionary of greeks for this position
+                      }
+        
+        Returns:
+            Dictionary with portfolio Greeks
+        
+        Example:
+            >>> positions = [
+            ...     {'weight': 100, 'greeks': greeks_call},
+            ...     {'weight': -100, 'greeks': greeks_put}  # Collar
+            ... ]
+            >>> portfolio_greeks = calc.portfolio_greeks(positions)
+        """
+        # Initialize portfolio Greeks
+        portfolio = {
+            'delta': 0,
+            'gamma': 0,
+            'vega': 0,
+            'theta': 0,
+            'rho': 0,
+            'vanna': 0,
+            'volga': 0,
+            'portfolio_value': 0
+        }
+        
+        # Sum weighted Greeks
+        for position in positions:
+            weight = position['weight']
+            greeks = position['greeks']
+            
+            for greek in portfolio.keys():
+                if greek in greeks:
+                    portfolio[greek] += weight * greeks[greek]
+                elif greek == 'portfolio_value' and 'price' in greeks:
+                    portfolio['portfolio_value'] += weight * greeks['price']
+        
+        # Add risk metrics
+        portfolio['delta_pct'] = portfolio['delta'] / portfolio['portfolio_value'] * 100 \
+                                if portfolio['portfolio_value'] != 0 else 0
+        
+        return portfolio
+    
+    # ========== Greeks Dashboard ==========
+    
+    def greeks_dashboard(self, S: float, K: float, T: float, r: float,
+                        sigma: float, q: float = 0.0,
+                        option_type: str = 'call') -> str:
+        """
+        Generate formatted Greeks dashboard for display
+        
+        Args:
+            S, K, T, r, sigma, q: Option parameters
+            option_type: 'call' or 'put'
+        
+        Returns:
+            Formatted string with Greeks table
+        """
+        greeks = self.black_scholes_greeks(S, K, T, r, sigma, q, option_type)
+        
+        dashboard = f"""
+{'='*70}
+                        GREEKS DASHBOARD
+{'='*70}
+
+Option Details:
+  Type: {option_type.upper()}
+  Spot Price (S):     {S:>10.2f}
+  Strike Price (K):   {K:>10.2f}
+  Time to Maturity:   {T:>10.4f} years ({T*365:.0f} days)
+  Risk-Free Rate:     {r*100:>10.2f}%
+  Volatility:         {sigma*100:>10.2f}%
+  Dividend Yield:     {q*100:>10.2f}%
+  
+  Moneyness (S/K):    {S/K:>10.4f}
+  Option Price:       {greeks['price']:>10.4f}
+
+{'='*70}
+FIRST-ORDER GREEKS (Sensitivities)
+{'='*70}
+
+Delta (Δ):          {greeks['delta']:>10.6f}  │ Change in value per \$1 move in spot
+                                              │ Hedge ratio: {abs(greeks['delta']):.0%}
+
+Gamma (Γ):          {greeks['gamma']:>10.6f}  │ Change in delta per \$1 move in spot
+                                              │ Convexity measure
+
+Vega (ν):           {greeks['vega']:>10.6f}  │ Change per 100% vol move
+Vega (1%):          {greeks['vega_pct']:>10.6f}  │ Change per 1% vol move
+
+Theta (Θ):          {greeks['theta']:>10.6f}  │ Annual time decay
+Theta (daily):      {greeks['theta_per_day']:>10.6f}  │ Daily time decay
+
+Rho (ρ):            {greeks['rho']:>10.6f}  │ Change per 100% rate move
+Rho (1%):           {greeks['rho_pct']:>10.6f}  │ Change per 1% rate move
+
+{'='*70}
+SECOND-ORDER GREEKS (Convexity)
+{'='*70}
+
+Vanna:              {greeks['vanna']:>10.6f}  │ ∂Delta/∂σ (delta-vega sensitivity)
+Volga/Vomma:        {greeks['volga']:>10.6f}  │ ∂Vega/∂σ (vega convexity)
+Charm:              {greeks['charm']:>10.6f}  │ ∂Delta/∂t (delta decay)
+
+{'='*70}
+THIRD-ORDER GREEKS (Rate of Change)
+{'='*70}
+
+Speed:              {greeks['speed']:>10.8f}  │ ∂Gamma/∂S
+Zomma:              {greeks['zomma']:>10.8f}  │ ∂Gamma/∂σ
+Color:              {greeks['color']:>10.8f}  │ ∂Gamma/∂t
+
+{'='*70}
+PROBABILITIES
+{'='*70}
+
+Prob ITM (RN):      {greeks['prob_itm']:>10.2%}  │ Risk-neutral probability
+Dual Delta:         {greeks['dual_delta']:>10.6f}  │ Exercise probability
+
+{'='*70}
+"""
+        return dashboard
+
+# ========== Utility Functions ==========
+
+def greek_heatmap_data(S_range: np.ndarray, sigma_range: np.ndarray,
+                      K: float, T: float, r: float, q: float,
+                      greek: str = 'delta',
+                      option_type: str = 'call') -> np.ndarray:
+    """
+    Generate heatmap data for a specific Greek across spot and volatility
+    
+    Useful for visualizing Greek surfaces
+    
+    Args:
+        S_range: Array of spot prices
+        sigma_range: Array of volatilities
+        K, T, r, q: Fixed option parameters
+        greek: Which Greek to compute
+        option_type: 'call' or 'put'
+    
+    Returns:
+        2D array of Greek values [len(S_range) × len(sigma_range)]
+    """
+    calc = GreeksCalculator()
+    heatmap = np.zeros((len(S_range), len(sigma_range)))
+    
+    for i, S in enumerate(S_range):
+        for j, sigma in enumerate(sigma_range):
+            greeks = calc.black_scholes_greeks(S, K, T, r, sigma, q, option_type)
+            heatmap[i, j] = greeks[greek]
+    
+    return heatmap
+
+def gamma_risk_limits(positions: List[Dict], S_range: np.ndarray) -> Dict:
+    """
+    Calculate gamma risk across spot price range
+    
+    Gamma risk: potential P&L from delta hedging
+    
+    Args:
+        positions: List of position dictionaries
+        S_range: Range of spot prices to test
+    
+    Returns:
+        Dictionary with risk metrics
+    """
+    calc = GreeksCalculator()
+    
+    # Portfolio gamma at each spot
+    gamma_profile = []
+    
+    for S in S_range:
+        total_gamma = 0
+        for pos in positions:
+            greeks = calc.black_scholes_greeks(
+                S, pos['K'], pos['T'], pos['r'], pos['sigma'], 
+                pos.get('q', 0), pos['option_type']
+            )
+            total_gamma += pos['weight'] * greeks['gamma']
+        
+        gamma_profile.append(total_gamma)
+    
+    gamma_profile = np.array(gamma_profile)
+    
+    return {
+        'spot_range': S_range,
+        'gamma_profile': gamma_profile,
+        'max_gamma': np.max(np.abs(gamma_profile)),
+        'gamma_at_current': gamma_profile[len(gamma_profile)//2] if len(gamma_profile) > 0 else 0
+    }
