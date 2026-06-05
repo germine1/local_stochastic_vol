@@ -10,7 +10,7 @@ A comprehensive Python framework for advanced volatility modeling, option pricin
 
 ## 🚀 Features
 
-### **5 State-of-the-Art Volatility Models**
+### ** Volatility Models**
 
 | Model | Type | Best For | Key Features |
 |-------|------|----------|--------------|
@@ -20,7 +20,7 @@ A comprehensive Python framework for advanced volatility modeling, option pricin
 | **Merton Jump** | Jump Diffusion | Earnings events, crashes | Lognormal jumps, analytical pricing |
 | **Kou Jump** | Jump Diffusion | Asymmetric tail risk | Double exponential jumps, heavy tails |
 
-### **3 Powerful Numerical Methods**
+### **3 Numerical Methods**
 
 - **Monte Carlo Simulation**
   - European, Asian, Barrier, American (LSM) options
